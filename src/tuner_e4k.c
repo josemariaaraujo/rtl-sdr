@@ -503,9 +503,25 @@ uint32_t e4k_compute_pll_params(struct e4k_pll_params *oscp, uint32_t fosc, uint
 	/* compute fractional part.  this will not overflow,
 	* as fosc(max) = 30MHz and z(max) = 255 */
 	remainder = intended_fvco - (fosc * z);
-	/* remainder(max) = 30MHz, E4K_PLL_Y = 65536 -> 64bit! */
+	/* remainder(max) = fosc - 1 = 30MHz, E4K_PLL_Y = 65536 -> 64bit! */
 	x = (remainder * E4K_PLL_Y) / fosc;
-	/* x(max) as result of this computation is 65536 */
+	/* x(max) as result of this computation is 65535 */
+
+    /* Rounding.  Our current discrepancy is in the range
+     * 0 ... -404Hz. (For a 28.8MHz crystal / 65536 =~ 404 Hz)
+     * By performing rounding, we shift the quantization
+     * error so that our target will be off from intended
+     * frequency by -202 Hz ... +202Hz. */
+    if (remainder > (fosc / 2))
+	{
+		x++;
+        if (x == 65536)
+        {
+			/* Carry overflow in x to an increment in z. */
+            z++;
+			x = 0;
+        }
+    }
 
 	flo = compute_flo(fosc, z, x, r);
 
