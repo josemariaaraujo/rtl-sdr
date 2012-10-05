@@ -564,16 +564,17 @@ int e4k_tune_params(struct e4k_state *e4k, struct e4k_pll_params *p)
  */
 int e4k_tune_freq(struct e4k_state *e4k, uint32_t freq)
 {
-	uint32_t rc;
+	uint32_t flo;
+	uint8_t rc;
 	struct e4k_pll_params p;
 
 	/* determine PLL parameters */
-	rc = e4k_compute_pll_params(&p, e4k->vco.fosc, freq);
-	if (!rc)
+	flo = e4k_compute_pll_params(&p, e4k->vco.fosc, freq);
+	if (!flo)
 		return -EINVAL;
 
 	/* actually tune to those parameters */
-	rc = e4k_tune_params(e4k, &p);
+	e4k_tune_params(e4k, &p);
 
 	/* check PLL lock */
 	rc = e4k_reg_read(e4k, E4K_REG_SYNTH1);
@@ -582,7 +583,7 @@ int e4k_tune_freq(struct e4k_state *e4k, uint32_t freq)
 		return -1;
 	}
 
-	return 0;
+	return flo;
 }
 
 /***********************************************************************
