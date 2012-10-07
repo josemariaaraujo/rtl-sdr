@@ -85,6 +85,7 @@ struct rtlsdr_dev {
 	rtlsdr_tuner_iface_t *tuner;
 	uint32_t tun_xtal; /* Hz */
 	uint32_t freq; /* Hz */
+	uint32_t offs_freq; /* Hz */
 	int corr; /* ppm */
 	int gain; /* tenth dB */
 	struct e4k_state e4k_s;
@@ -105,9 +106,18 @@ int e4000_set_freq(void *dev, uint32_t freq) {
 	rtlsdr_dev_t* devt = (rtlsdr_dev_t*)dev;
 	return e4k_tune_freq(&devt->e4k_s, freq);
 }
+
 int e4000_set_bw(void *dev, int bw) {
-	return 0;
+	int r = 0;
+	rtlsdr_dev_t* devt = (rtlsdr_dev_t*)dev;
+
+	r |= e4k_if_filter_bw_set(&devt->e4k_s, E4K_IF_FILTER_MIX, bw);
+	r |= e4k_if_filter_bw_set(&devt->e4k_s, E4K_IF_FILTER_RC, bw);
+	r |= e4k_if_filter_bw_set(&devt->e4k_s, E4K_IF_FILTER_CHAN, bw);
+
+	return r;
 }
+
 int e4000_set_gain(void *dev, int gain) {
 	rtlsdr_dev_t* devt = (rtlsdr_dev_t*)dev;
 	int mixgain = (gain > 340) ? 12 : 4;
@@ -708,7 +718,7 @@ uint32_t rtlsdr_set_center_freq(rtlsdr_dev_t *dev, uint32_t freq)
 		r = rtlsdr_set_if_freq(dev, freq);
 	} else if (dev->tuner && dev->tuner->set_freq) {
 		rtlsdr_set_i2c_repeater(dev, 1);
-		r = dev->tuner->set_freq(dev, freq);
+		r = dev->tuner->set_freq(dev, freq - dev->offs_freq);
 		rtlsdr_set_i2c_repeater(dev, 0);
 	}
 
@@ -972,11 +982,10 @@ int rtlsdr_set_direct_sampling(rtlsdr_dev_t *dev, int on)
 		r |= rtlsdr_demod_write_reg(dev, 0, 0x08, 0x4d, 1);
 
 		/* swap I and Q ADC, this allows to select between two inputs */
-		if (on > 1)
-			r |= rtlsdr_demod_write_reg(dev, 0, 0x06, 0x90, 1);
+		r |= rtlsdr_demod_write_reg(dev, 0, 0x06, (on > 1) ? 0x90 : 0x80, 1);
 
-		fprintf(stderr, "Enabled direct sampling mode\n");
-		dev->direct_sampling = 1;
+		fprintf(stderr, "Enabled direct sampling mode, input %i\n", on);
+		dev->direct_sampling = on;
 	} else {
 		if (dev->tuner && dev->tuner->init) {
 			rtlsdr_set_i2c_repeater(dev, 1);
@@ -1006,7 +1015,53 @@ int rtlsdr_set_direct_sampling(rtlsdr_dev_t *dev, int on)
 		dev->direct_sampling = 0;
 	}
 
+	r |= rtlsdr_set_center_freq(dev, dev->freq);
+
 	return r;
+}
+
+int rtlsdr_get_direct_sampling(rtlsdr_dev_t *dev)
+{
+	if (!dev)
+		return -1;
+
+	return dev->direct_sampling;
+}
+
+int rtlsdr_set_offset_tuning(rtlsdr_dev_t *dev, int on)
+{
+	int r = 0;
+
+	if (!dev)
+		return -1;
+
+	if (dev->tuner_type == RTLSDR_TUNER_R820T)
+		return -2;
+
+	if (dev->direct_sampling)
+		return -3;
+
+	/* based on keenerds 1/f noise measurements */
+	dev->offs_freq = on ? ((dev->rate / 2) * 170 / 100) : 0;
+	r |= rtlsdr_set_if_freq(dev, dev->offs_freq);
+
+	if (dev->tuner && dev->tuner->set_bw) {
+		rtlsdr_set_i2c_repeater(dev, 1);
+		dev->tuner->set_bw(dev, on ? (2 * dev->offs_freq) : dev->rate);
+		rtlsdr_set_i2c_repeater(dev, 0);
+	}
+
+	r |= rtlsdr_set_center_freq(dev, dev->freq);
+
+	return r;
+}
+
+int rtlsdr_get_offset_tuning(rtlsdr_dev_t *dev)
+{
+	if (!dev)
+		return -1;
+
+	return (dev->offs_freq) ? 1 : 0;
 }
 
 static rtlsdr_dongle_t *find_known_device(uint16_t vid, uint16_t pid)
