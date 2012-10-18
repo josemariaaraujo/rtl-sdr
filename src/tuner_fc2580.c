@@ -88,10 +88,10 @@ fc2580_SetRfFreqHz(
 	if(fc2580_set_freq(pTuner, RfFreqKhz, CrystalFreqKhz) != FC2580_FCI_SUCCESS)
 		goto error_status_set_tuner_rf_frequency;
 
-	return FUNCTION_SUCCESS;
+	return RfFreqKhz*1000;
 
 error_status_set_tuner_rf_frequency:
-	return FUNCTION_ERROR;
+	return -1;
 }
 
 /**

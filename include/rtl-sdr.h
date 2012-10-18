@@ -99,7 +99,7 @@ RTLSDR_API int rtlsdr_get_xtal_freq(rtlsdr_dev_t *dev, uint32_t *rtl_freq,
 RTLSDR_API int rtlsdr_get_usb_strings(rtlsdr_dev_t *dev, char *manufact,
 				      char *product, char *serial);
 
-RTLSDR_API uint32_t rtlsdr_set_center_freq(rtlsdr_dev_t *dev, uint32_t freq);
+RTLSDR_API int rtlsdr_set_center_freq(rtlsdr_dev_t *dev, uint32_t freq);
 
 /*!
  * Get actual frequency the device is tuned to.

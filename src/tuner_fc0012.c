@@ -308,7 +308,10 @@ int fc0012_set_params(void *dev, uint32_t freq, uint32_t bandwidth)
 	}
 
 exit:
-	return ret;
+	if (!ret)
+		return freq;
+	else
+		return -1;
 }
 
 int fc0012_set_gain(void *dev, int gain)

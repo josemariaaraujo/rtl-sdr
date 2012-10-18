@@ -26,7 +26,7 @@ int r820t_SetRfFreqHz(void *pTuner, unsigned long RfFreqHz)
 	if(R828_SetFrequency(pTuner, R828Info, NORMAL_MODE) != RT_Success)
 		return FUNCTION_ERROR;
 
-	return FUNCTION_SUCCESS;
+	return RfFreqHz;
 }
 
 int r820t_SetStandardMode(void *pTuner, int StandardMode)

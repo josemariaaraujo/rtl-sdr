@@ -707,12 +707,12 @@ int rtlsdr_get_usb_strings(rtlsdr_dev_t *dev, char *manufact, char *product,
 	return 0;
 }
 
-uint32_t rtlsdr_set_center_freq(rtlsdr_dev_t *dev, uint32_t freq)
+int rtlsdr_set_center_freq(rtlsdr_dev_t *dev, uint32_t freq)
 {
 	int r = -1;
 
 	if (!dev || !dev->tuner)
-		return 0;
+		return -1;
 
 	if (dev->direct_sampling) {
 		r = rtlsdr_set_if_freq(dev, freq);
@@ -723,11 +723,16 @@ uint32_t rtlsdr_set_center_freq(rtlsdr_dev_t *dev, uint32_t freq)
 	}
 
 	if (r>0)
+	{
 		dev->freq = r;
+		return 0;
+	}
 	else
+	{
 		dev->freq = 0;
+		return -1;
+	}
 
-	return dev->freq;;
 }
 
 uint32_t rtlsdr_get_center_freq(rtlsdr_dev_t *dev)
