@@ -179,7 +179,7 @@ static void *tcp_worker(void *arg)
 
 		pthread_mutex_lock(&ll_mutex);
 		gettimeofday(&tp, NULL);
-		ts.tv_sec  = tp.tv_sec+1;
+		ts.tv_sec  = tp.tv_sec+5;
 		ts.tv_nsec = tp.tv_usec * 1000;
 		r = pthread_cond_timedwait(&cond, &ll_mutex, &ts);
 		if(r == ETIMEDOUT) {
@@ -316,6 +316,14 @@ static void *command_worker(void *arg)
 		case 0x0a:
 			printf("set offset tuning %d\n", ntohl(cmd.param));
 			rtlsdr_set_offset_tuning(dev, ntohl(cmd.param));
+			break;
+		case 0x0b:
+			printf("set rtl xtal %d\n", ntohl(cmd.param));
+			rtlsdr_set_xtal_freq(dev, ntohl(cmd.param), 0);
+			break;
+		case 0x0c:
+			printf("set tuner xtal %d\n", ntohl(cmd.param));
+			rtlsdr_set_xtal_freq(dev, 0, ntohl(cmd.param));
 			break;
 		default:
 			break;
