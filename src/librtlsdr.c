@@ -180,8 +180,8 @@ int r820t_init(void *dev) {
 int r820t_exit(void *dev) { return 0; }
 int r820t_set_freq(void *dev, uint32_t freq) { return r820t_SetRfFreqHz(dev, freq); }
 int r820t_set_bw(void *dev, int bw) { return 0; }
-int r820t_set_gain(void *dev, int gain) { return 0; }
-int r820t_set_gain_mode(void *dev, int manual) { return 0; }
+int r820t_set_gain(void *dev, int gain) { return R828_SetRfGain(dev, gain); }
+int r820t_set_gain_mode(void *dev, int manual) { return R828_RfGainMode(dev, manual); }
 
 /* definition order must match enum rtlsdr_tuner */
 static rtlsdr_tuner_iface_t tuners[] = {
@@ -235,6 +235,7 @@ static rtlsdr_dongle_t known_devices[] = {
 	{ 0x0ccd, 0x00d3, "Terratec Cinergy T Stick RC (Rev.3)" },
 	{ 0x0ccd, 0x00d7, "Terratec T Stick PLUS" },
 	{ 0x0ccd, 0x00e0, "Terratec NOXON DAB/DAB+ USB dongle (rev 2)" },
+	{ 0x1554, 0x5020, "PixelView PV-DT235U(RN)" },
 	{ 0x185b, 0x0620, "Compro Videomate U620F"},
 	{ 0x185b, 0x0650, "Compro Videomate U650F"},
 	{ 0x185b, 0x0680, "Compro Videomate U680F"},
@@ -248,6 +249,7 @@ static rtlsdr_dongle_t known_devices[] = {
 	{ 0x1d19, 0x1101, "Dexatek DK DVB-T Dongle (Logilink VG0002A)" },
 	{ 0x1d19, 0x1102, "Dexatek DK DVB-T Dongle (MSI DigiVox mini II V3.0)" },
 	{ 0x1d19, 0x1103, "Dexatek Technology Ltd. DK 5217 DVB-T Dongle" },
+	{ 0x1d19, 0x1104, "MSI DigiVox Micro HD" },
 	{ 0x0458, 0x707f, "Genius TVGo DVB-T03 USB dongle (Ver. B)" },
 	{ 0x1b80, 0xd393, "GIGABYTE GT-U7300" },
 	{ 0x1b80, 0xd394, "DIKOM USB-DVBT HD" },
@@ -793,7 +795,10 @@ int rtlsdr_get_tuner_gains(rtlsdr_dev_t *dev, int *gains)
 				       63, 65, 67, 68, 70, 71, 179, 181, 182,
 				       184, 186, 188, 191, 197 };
 	const int fc2580_gains[] = { 0 /* no gain values */ };
-	const int r820t_gains[] = { 0 /* no gain values */ };
+	const int r820t_gains[] = { 0, 9, 14, 27, 37, 77, 87, 125, 144, 157,
+				     166, 197, 207, 229, 254, 280, 297, 328,
+				     338, 364, 372, 386, 402, 421, 434, 439,
+				     445, 480, 496 };
 	const int unknown_gains[] = { 0 /* no gain values */ };
 
 	int *ptr = NULL;
@@ -936,6 +941,10 @@ int rtlsdr_set_sample_rate(rtlsdr_dev_t *dev, uint32_t samp_rate)
 	r |= rtlsdr_demod_write_reg(dev, 1, 0x01, 0x14, 1);
 	r |= rtlsdr_demod_write_reg(dev, 1, 0x01, 0x10, 1);
 
+	/* recalculate offset frequency if offset tuning is enabled */
+	if (dev->offs_freq)
+		rtlsdr_set_offset_tuning(dev, 1);
+
 	return r;
 }
 
@@ -1056,7 +1065,8 @@ int rtlsdr_set_offset_tuning(rtlsdr_dev_t *dev, int on)
 		rtlsdr_set_i2c_repeater(dev, 0);
 	}
 
-	r |= rtlsdr_set_center_freq(dev, dev->freq);
+	if (dev->freq > dev->offs_freq)
+		r |= rtlsdr_set_center_freq(dev, dev->freq);
 
 	return r;
 }
