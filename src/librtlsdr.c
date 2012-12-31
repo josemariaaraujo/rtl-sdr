@@ -591,7 +591,7 @@ int rtlsdr_set_if_freq(rtlsdr_dev_t *dev, uint32_t freq)
 	if (rtlsdr_get_xtal_freq(dev, &rtl_xtal, NULL))
 		return -2;
 
-	if_freq = ((freq * TWO_POW(22)) / rtl_xtal) * (-1);
+	if_freq = (((freq * TWO_POW(22))+(rtl_xtal/2)) / rtl_xtal) * (-1);
 
 	tmp = (if_freq >> 16) & 0x3f;
 	r = rtlsdr_demod_write_reg(dev, 1, 0x19, tmp, 1);
@@ -777,29 +777,30 @@ int rtlsdr_read_eeprom(rtlsdr_dev_t *dev, uint8_t *data, uint8_t offset, uint16_
 int rtlsdr_set_center_freq(rtlsdr_dev_t *dev, uint32_t freq)
 {
 	int r = -1;
+	uint32_t newfreq,rtl_xtal;
 
 	if (!dev || !dev->tuner)
 		return -1;
 
+	if (rtlsdr_get_xtal_freq(dev, &rtl_xtal, NULL))
+		return -2;
+
 	if (dev->direct_sampling) {
 		r = rtlsdr_set_if_freq(dev, freq);
+		newfreq=((int32_t)(((freq * TWO_POW(22))+(rtl_xtal/2)) / rtl_xtal)&0x3fffff)*(rtl_xtal/TWO_POW(22));
 	} else if (dev->tuner && dev->tuner->set_freq) {
 		rtlsdr_set_i2c_repeater(dev, 1);
-		r = dev->tuner->set_freq(dev, freq - dev->offs_freq);
+		newfreq = dev->tuner->set_freq(dev, freq - dev->offs_freq) + dev->offs_freq ;
+		if (newfreq>=0) r=0; else r=-1;
 		rtlsdr_set_i2c_repeater(dev, 0);
 	}
 
-	if (r>0)
-	{
-		dev->freq = r;
-		return 0;
-	}
+	if (!r)
+		dev->freq = newfreq;
 	else
-	{
 		dev->freq = 0;
-		return -1;
-	}
 
+	return r;
 }
 
 uint32_t rtlsdr_get_center_freq(rtlsdr_dev_t *dev)
@@ -1110,6 +1111,7 @@ int rtlsdr_get_direct_sampling(rtlsdr_dev_t *dev)
 int rtlsdr_set_offset_tuning(rtlsdr_dev_t *dev, int on)
 {
 	int r = 0;
+	uint32_t rtl_xtal;
 
 	if (!dev)
 		return -1;
@@ -1120,8 +1122,13 @@ int rtlsdr_set_offset_tuning(rtlsdr_dev_t *dev, int on)
 	if (dev->direct_sampling)
 		return -3;
 
-	/* based on keenerds 1/f noise measurements */
-	dev->offs_freq = on ? ((dev->rate / 2) * 170 / 100) : 0;
+	if (rtlsdr_get_xtal_freq(dev, &rtl_xtal, NULL))
+		return -1;
+
+	/* based on keenerds 1/f noise measurements
+	   correct for nearest value possible*/
+	dev->offs_freq = on ? (((int32_t)((((((dev->rate / 2) * 170 / 100) * TWO_POW(22))+rtl_xtal/2) / rtl_xtal))&0x3fffff)*(rtl_xtal/TWO_POW(22))) : 0; 
+		
 	r |= rtlsdr_set_if_freq(dev, dev->offs_freq);
 
 	if (dev->tuner && dev->tuner->set_bw) {
