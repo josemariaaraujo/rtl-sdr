@@ -867,7 +867,7 @@ int rtlsdr_get_tuner_gains(rtlsdr_dev_t *dev, int *gains)
 				     445, 480, 496 };
 	const int unknown_gains[] = { 0 /* no gain values */ };
 
-	int *ptr = NULL;
+	const int *ptr = NULL;
 	int len = 0;
 
 	if (!dev)
@@ -875,22 +875,22 @@ int rtlsdr_get_tuner_gains(rtlsdr_dev_t *dev, int *gains)
 
 	switch (dev->tuner_type) {
 	case RTLSDR_TUNER_E4000:
-		ptr = (int *)e4k_gains; len = sizeof(e4k_gains);
+		ptr = e4k_gains; len = sizeof(e4k_gains);
 		break;
 	case RTLSDR_TUNER_FC0012:
-		ptr = (int *)fc0012_gains; len = sizeof(fc0012_gains);
+		ptr = fc0012_gains; len = sizeof(fc0012_gains);
 		break;
 	case RTLSDR_TUNER_FC0013:
-		ptr = (int *)fc0013_gains; len = sizeof(fc0013_gains);
+		ptr = fc0013_gains; len = sizeof(fc0013_gains);
 		break;
 	case RTLSDR_TUNER_FC2580:
-		ptr = (int *)fc2580_gains; len = sizeof(fc2580_gains);
+		ptr = fc2580_gains; len = sizeof(fc2580_gains);
 		break;
 	case RTLSDR_TUNER_R820T:
-		ptr = (int *)r820t_gains; len = sizeof(r820t_gains);
+		ptr = r820t_gains; len = sizeof(r820t_gains);
 		break;
 	default:
-		ptr = (int *)unknown_gains; len = sizeof(unknown_gains);
+		ptr = unknown_gains; len = sizeof(unknown_gains);
 		break;
 	}
 
@@ -971,7 +971,6 @@ int rtlsdr_set_sample_rate(rtlsdr_dev_t *dev, uint32_t samp_rate)
 	uint16_t tmp;
 	uint32_t rsamp_ratio;
 	double real_rate;
-	uint32_t rtl_freq = dev->rtl_xtal;
 
 	if (!dev)
 		return -1;
@@ -980,10 +979,10 @@ int rtlsdr_set_sample_rate(rtlsdr_dev_t *dev, uint32_t samp_rate)
 	if (samp_rate > MAX_SAMP_RATE)
 		samp_rate = MAX_SAMP_RATE;
 
-	rsamp_ratio = (rtl_freq * TWO_POW(22)) / samp_rate;
+	rsamp_ratio = (dev->rtl_xtal * TWO_POW(22)) / samp_rate;
 	rsamp_ratio &= ~3;
 
-	real_rate = (rtl_freq * TWO_POW(22)) / rsamp_ratio;
+	real_rate = (dev->rtl_xtal * TWO_POW(22)) / rsamp_ratio;
 
 	if ( ((double)samp_rate) != real_rate )
 		fprintf(stderr, "Exact sample rate is: %f Hz\n", real_rate);
