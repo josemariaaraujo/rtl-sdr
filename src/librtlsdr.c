@@ -89,6 +89,7 @@ struct rtlsdr_dev {
 	int corr; /* ppm */
 	int gain; /* tenth dB */
 	struct e4k_state e4k_s;
+	int dev_lost;
 };
 
 void rtlsdr_set_gpio_bit(rtlsdr_dev_t *dev, uint8_t gpio, int val);
@@ -101,7 +102,10 @@ int e4000_init(void *dev) {
 	devt->e4k_s.rtl_dev = dev;
 	return e4k_init(&devt->e4k_s);
 }
-int e4000_exit(void *dev) { return 0; }
+int e4000_exit(void *dev) {
+	rtlsdr_dev_t* devt = (rtlsdr_dev_t*)dev;
+	return e4k_standby(&devt->e4k_s, 1);
+}
 int e4000_set_freq(void *dev, uint32_t freq) {
 	rtlsdr_dev_t* devt = (rtlsdr_dev_t*)dev;
 	return e4k_tune_freq(&devt->e4k_s, freq);
@@ -177,7 +181,7 @@ int r820t_init(void *dev) {
 	r820t_SetStandardMode(dev, DVB_T_6M);
 	return r;
 }
-int r820t_exit(void *dev) { return 0; }
+int r820t_exit(void *dev) { return r820t_SetStandby(dev, 0); }
 int r820t_set_freq(void *dev, uint32_t freq) { return r820t_SetRfFreqHz(dev, freq); }
 int r820t_set_bw(void *dev, int bw) { return 0; }
 int r820t_set_gain(void *dev, int gain) { return R828_SetRfGain(dev, gain); }
@@ -360,7 +364,8 @@ uint8_t rtlsdr_i2c_read_reg(rtlsdr_dev_t *dev, uint8_t i2c_addr, uint8_t reg)
 /* TODO clean this up again */
 int e4k_reg_write(struct e4k_state *e4k, uint8_t reg, uint8_t val)
 {
-	return rtlsdr_i2c_write_reg((rtlsdr_dev_t*)e4k->rtl_dev, e4k->i2c_addr, reg, val);}
+	return rtlsdr_i2c_write_reg((rtlsdr_dev_t*)e4k->rtl_dev, e4k->i2c_addr, reg, val);
+}
 
 uint8_t e4k_reg_read(struct e4k_state *e4k, uint8_t reg)
 {
@@ -1317,6 +1322,8 @@ int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
 
 	libusb_init(&dev->ctx);
 
+	dev->dev_lost = 1;
+
 	cnt = libusb_get_device_list(dev->ctx, &list);
 
 	for (i = 0; i < cnt; i++) {
@@ -1343,6 +1350,9 @@ int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
 	if (r < 0) {
 		libusb_free_device_list(list, 1);
 		fprintf(stderr, "usb_open error %d\n", r);
+		if(r == LIBUSB_ERROR_ACCESS)
+			fprintf(stderr, "Please fix the device permissions, e.g. "
+			"by installing the udev rules file rtl-sdr.rules\n");
 		goto err;
 	}
 
@@ -1356,7 +1366,14 @@ int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
 
 	dev->rtl_xtal = DEF_RTL_XTAL_FREQ;
 
+	/* perform a dummy write, if it fails, reset the device */
+	if (rtlsdr_write_reg(dev, USBB, USB_SYSCTL, 0x09, 1) < 0) {
+		fprintf(stderr, "Resetting device...\n");
+		libusb_reset_device(dev->devh);
+	}
+
 	rtlsdr_init_baseband(dev);
+	dev->dev_lost = 0;
 
 	/* Probe tuners */
 	rtlsdr_set_i2c_repeater(dev, 1);
@@ -1451,16 +1468,18 @@ int rtlsdr_close(rtlsdr_dev_t *dev)
 	if (!dev)
 		return -1;
 
-	/* block until all async operations have been completed (if any) */
-	while (RTLSDR_INACTIVE != dev->async_status) {
+	if(!dev->dev_lost) {
+		/* block until all async operations have been completed (if any) */
+		while (RTLSDR_INACTIVE != dev->async_status) {
 #ifdef _WIN32
-		Sleep(1);
+			Sleep(1);
 #else
-		usleep(1000);
+			usleep(1000);
 #endif
-	}
+		}
 
-	rtlsdr_deinit_baseband(dev);
+		rtlsdr_deinit_baseband(dev);
+	}
 
 	libusb_release_interface(dev->devh, 0);
 	libusb_close(dev->devh);
@@ -1500,10 +1519,11 @@ static void LIBUSB_CALL _libusb_callback(struct libusb_transfer *xfer)
 			dev->cb(xfer->buffer, xfer->actual_length, dev->cb_ctx);
 
 		libusb_submit_transfer(xfer); /* resubmit transfer */
-	} else if (LIBUSB_TRANSFER_CANCELLED == xfer->status) {
-		/* nothing to do */
-	} else {
-		/*fprintf(stderr, "transfer status: %d\n", xfer->status);*/
+	} else if (LIBUSB_TRANSFER_CANCELLED != xfer->status &&
+				LIBUSB_TRANSFER_COMPLETED != xfer->status) {
+		dev->dev_lost = 1;
+		rtlsdr_cancel_async(dev);
+		fprintf(stderr, "cb transfer status: %d, canceling...\n", xfer->status);
 	}
 }
 
@@ -1639,8 +1659,10 @@ int rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx,
 				}
 			}
 
-			if (RTLSDR_INACTIVE == next_status)
+			if (dev->dev_lost || RTLSDR_INACTIVE == next_status) {
+				libusb_handle_events_timeout(dev->ctx, &tv);
 				break;
+			}
 		}
 	}
 
@@ -1663,11 +1685,12 @@ int rtlsdr_cancel_async(rtlsdr_dev_t *dev)
 	}
 
 	/* if called while in pending state, change the state forcefully */
+#if 0
 	if (RTLSDR_INACTIVE != dev->async_status) {
 		dev->async_status = RTLSDR_INACTIVE;
 		return 0;
 	}
-
+#endif
 	return -2;
 }
 
