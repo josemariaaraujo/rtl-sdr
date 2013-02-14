@@ -3,6 +3,7 @@
  * Copyright (C) 2012 by Steve Markgraf <steve@steve-m.de>
  * Copyright (C) 2012 by Hoernchen <la@tfc-server.de>
  * Copyright (C) 2012 by Kyle Keen <keenerd@gmail.com>
+ * Copyright (C) 2013 by Elias Oenal <EliasOenal@gmail.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -53,7 +54,6 @@
 #define round(x) (x > 0.0 ? floor(x + 0.5): ceil(x - 0.5))
 #endif
 
-#include <semaphore.h>
 #include <pthread.h>
 #include <libusb.h>
 
@@ -67,25 +67,25 @@
 #define AUTO_GAIN			-100
 
 static pthread_t demod_thread;
-static sem_t data_ready;
+static pthread_mutex_t data_ready;  /* locked when no fresh data available */
+static pthread_mutex_t data_write;  /* locked when r/w buffer */
 static int do_exit = 0;
 static rtlsdr_dev_t *dev = NULL;
 static int lcm_post[17] = {1,1,1,3,1,5,3,7,1,9,5,11,3,13,7,15,1};
 
+static int *atan_lut = NULL;
+static int atan_lut_size = 131072; /* 512 KB */
+static int atan_lut_coef = 8;
+
 struct fm_state
 {
-	int      now_r;
-	int      now_j;
-	int      pre_r;
-	int      pre_j;
+	int      now_r, now_j;
+	int      pre_r, pre_j;
 	int      prev_index;
 	int      downsample;    /* min 1, max 256 */
 	int      post_downsample;
 	int      output_scale;
-	int      squelch_level;
-	int      conseq_squelch;
-	int      squelch_hits;
-	int      terminate_on_squelch;
+	int      squelch_level, conseq_squelch, squelch_hits, terminate_on_squelch;
 	int      exit_flag;
 	uint8_t  buf[MAXIMUM_BUF_LENGTH];
 	uint32_t buf_len;
@@ -104,10 +104,10 @@ struct fm_state
 	int      fir[256];  /* fir_len == downsample */
 	int      fir_sum;
 	int      custom_atan;
-	int      deemph;
-	int      deemph_a;
+	int      deemph, deemph_a;
 	int      now_lpr;
 	int      prev_lpr_index;
+	int      dc_block, dc_avg;
 	void     (*mode_demod)(struct fm_state*);
 };
 
@@ -128,7 +128,7 @@ void usage(void)
 		"\t[-E sets lower edge tuning (default: center)]\n"
 		"\t[-N enables NBFM mode (default: on)]\n"
 		"\t[-W enables WBFM mode (default: off)]\n"
-		"\t (-N -s 170k -o 4 -A -r 32k -l 0 -D)\n"
+		"\t (-N -s 170k -o 4 -A fast -r 32k -l 0 -D)\n"
 		"\tfilename (a '-' dumps samples to stdout)\n"
 		"\t (omitting the filename also uses stdout)\n\n"
 		"Experimental options:\n"
@@ -142,7 +142,8 @@ void usage(void)
 		"\t[-R enables raw mode (default: off, 2x16 bit output)]\n"
 		"\t[-F enables high quality FIR (default: off/square)]\n"
 		"\t[-D enables de-emphasis (default: off)]\n"
-		"\t[-A enables high speed arctan (default: off)]\n\n"
+		"\t[-C enables DC blocking of output (default: off)]\n"
+		"\t[-A std/fast/lut choose atan math (default: std)]\n\n"
 		"Produces signed 16 bit ints, use Sox or aplay to hear them.\n"
 		"\trtl_fm ... - | play -t raw -r 24k -e signed-integer -b 16 -c 1 -V1 -\n"
 		"\t             | aplay -r 24k -f S16_LE -t raw -c 1\n"
@@ -343,6 +344,57 @@ int polar_disc_fast(int ar, int aj, int br, int bj)
 	return fast_atan2(cj, cr);
 }
 
+int atan_lut_init()
+{
+	int i = 0;
+
+	atan_lut = malloc(atan_lut_size * sizeof(int));
+
+	for (i = 0; i < atan_lut_size; i++) {
+		atan_lut[i] = (int) (atan((double) i / (1<<atan_lut_coef)) / 3.14159 * (1<<14));
+	}
+
+	return 0;
+}
+
+int polar_disc_lut(int ar, int aj, int br, int bj)
+{
+	int cr, cj, x, x_abs;
+
+	multiply(ar, aj, br, -bj, &cr, &cj);
+
+	/* special cases */
+	if (cr == 0 || cj == 0) {
+		if (cr == 0 && cj == 0)
+			{return 0;}
+		if (cr == 0 && cj > 0)
+			{return 1 << 13;}
+		if (cr == 0 && cj < 0)
+			{return -(1 << 13);}
+		if (cj == 0 && cr > 0)
+			{return 0;}
+		if (cj == 0 && cr < 0)
+			{return 1 << 14;}
+	}
+
+	/* real range -32768 - 32768 use 64x range -> absolute maximum: 2097152 */
+	x = (cj << atan_lut_coef) / cr;
+	x_abs = abs(x);
+
+	if (x_abs >= atan_lut_size) {
+		/* we can use linear range, but it is not necessary */
+		return (cj > 0) ? 1<<13 : -1<<13;
+	}
+
+	if (x > 0) {
+		return (cj > 0) ? atan_lut[x] : atan_lut[x] - (1<<14);
+	} else {
+		return (cj > 0) ? (1<<14) - atan_lut[-x] : -atan_lut[-x];
+	}
+
+	return 0;
+}
+
 void fm_demod(struct fm_state *fm)
 {
 	int i, pcm;
@@ -350,12 +402,19 @@ void fm_demod(struct fm_state *fm)
 		fm->pre_r, fm->pre_j);
 	fm->signal2[0] = (int16_t)pcm;
 	for (i = 2; i < (fm->signal_len); i += 2) {
-		if (fm->custom_atan) {
-			pcm = polar_disc_fast(fm->signal[i], fm->signal[i+1],
-				fm->signal[i-2], fm->signal[i-1]);
-		} else {
+		switch (fm->custom_atan) {
+		case 0:
 			pcm = polar_discriminant(fm->signal[i], fm->signal[i+1],
 				fm->signal[i-2], fm->signal[i-1]);
+			break;
+		case 1:
+			pcm = polar_disc_fast(fm->signal[i], fm->signal[i+1],
+				fm->signal[i-2], fm->signal[i-1]);
+			break;
+		case 2:
+			pcm = polar_disc_lut(fm->signal[i], fm->signal[i+1],
+				fm->signal[i-2], fm->signal[i-1]);
+			break;
 		}
 		fm->signal2[i/2] = (int16_t)pcm;
 	}
@@ -424,6 +483,21 @@ void deemph_filter(struct fm_state *fm)
 		}
 		fm->signal2[i] = (int16_t)avg;
 	}
+}
+
+void dc_block_filter(struct fm_state *fm)
+{
+	int i, avg;
+	int64_t sum = 0;
+	for (i=0; i < fm->signal2_len; i++) {
+		sum += fm->signal2[i];
+	}
+	avg = sum / fm->signal2_len;
+	avg = (avg + fm->dc_avg * 9) / 10;
+	for (i=0; i < fm->signal2_len; i++) {
+		fm->signal2[i] -= avg;
+	}
+	fm->dc_avg = avg;
 }
 
 int mad(int *samples, int len, int step)
@@ -506,6 +580,7 @@ void full_demod(struct fm_state *fm)
 	} else {
 		low_pass(fm, fm->buf, fm->buf_len);
 	}
+	pthread_mutex_unlock(&data_write);
 	fm->mode_demod(fm);
         if (fm->mode_demod == &raw_demod) {
 		fwrite(fm->signal2, 2, fm->signal2_len, fm->file);
@@ -529,6 +604,8 @@ void full_demod(struct fm_state *fm)
 	}
 	if (fm->deemph) {
 		deemph_filter(fm);}
+	if (fm->dc_block) {
+		dc_block_filter(fm);}
 	/* ignore under runs for now */
 	fwrite(fm->signal2, 2, fm->signal2_len, fm->file);
 	if (hop) {
@@ -544,25 +621,23 @@ void full_demod(struct fm_state *fm)
 static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 {
 	struct fm_state *fm2 = ctx;
-	int dr_val;
 	if (do_exit) {
 		return;}
 	if (!ctx) {
 		return;}
+	pthread_mutex_lock(&data_write);
 	memcpy(fm2->buf, buf, len);
 	fm2->buf_len = len;
+	pthread_mutex_unlock(&data_ready);
 	/* single threaded uses 25% less CPU? */
 	/* full_demod(fm2); */
-	sem_getvalue(&data_ready, &dr_val);
-	if (dr_val <= 0) {
-		sem_post(&data_ready);}
 }
 
 static void *demod_thread_fn(void *arg)
 {
 	struct fm_state *fm2 = arg;
 	while (!do_exit) {
-		sem_wait(&data_ready);
+		pthread_mutex_lock(&data_ready);
 		full_demod(fm2);
 		if (fm2->exit_flag) {
 			do_exit = 1;
@@ -610,6 +685,31 @@ void frequency_range(struct fm_state *fm, char *arg)
 	step[-1] = ':';
 }
 
+void fm_init(struct fm_state *fm)
+{
+	fm->freqs[0] = 100000000;
+	fm->sample_rate = DEFAULT_SAMPLE_RATE;
+	fm->squelch_level = 0;
+	fm->conseq_squelch = 20;
+	fm->terminate_on_squelch = 0;
+	fm->squelch_hits = 0;
+	fm->freq_len = 0;
+	fm->edge = 0;
+	fm->fir_enable = 0;
+	fm->prev_index = 0;
+	fm->post_downsample = 1;  // once this works, default = 4
+	fm->custom_atan = 0;
+	fm->deemph = 0;
+	fm->output_rate = -1;  // flag for disabled
+	fm->mode_demod = &fm_demod;
+	fm->pre_j = fm->pre_r = fm->now_r = fm->now_j = 0;
+	fm->prev_lpr_index = 0;
+	fm->deemph_a = 0;
+	fm->now_lpr = 0;
+	fm->dc_block = 0;
+	fm->dc_avg = 0;
+}
+
 int main(int argc, char **argv)
 {
 #ifndef _WIN32
@@ -624,23 +724,11 @@ int main(int argc, char **argv)
 	int device_count;
 	int ppm_error = 0;
 	char vendor[256], product[256], serial[256];
-	fm.freqs[0] = 100000000;
-	fm.sample_rate = DEFAULT_SAMPLE_RATE;
-	fm.squelch_level = 0;
-	fm.conseq_squelch = 20;
-	fm.terminate_on_squelch = 0;
-	fm.freq_len = 0;
-	fm.edge = 0;
-	fm.fir_enable = 0;
-	fm.prev_index = 0;
-	fm.post_downsample = 1;  // once this works, default = 4
-	fm.custom_atan = 0;
-	fm.deemph = 0;
-	fm.output_rate = -1;  // flag for disabled
-	fm.mode_demod = &fm_demod;
-	sem_init(&data_ready, 0, 0);
+	fm_init(&fm);
+	pthread_mutex_init(&data_ready, NULL);
+	pthread_mutex_init(&data_write, NULL);
 
-	while ((opt = getopt(argc, argv, "d:f:g:s:b:l:o:t:r:p:EFANWMULRD")) != -1) {
+	while ((opt = getopt(argc, argv, "d:f:g:s:b:l:o:t:r:p:EFA:NWMULRDC")) != -1) {
 		switch (opt) {
 		case 'd':
 			dev_index = atoi(optarg);
@@ -688,10 +776,19 @@ int main(int argc, char **argv)
 			fm.fir_enable = 1;
 			break;
 		case 'A':
-			fm.custom_atan = 1;
+			if (strcmp("std",  optarg) == 0) {
+				fm.custom_atan = 0;}
+			if (strcmp("fast", optarg) == 0) {
+				fm.custom_atan = 1;}
+			if (strcmp("lut",  optarg) == 0) {
+				atan_lut_init();
+				fm.custom_atan = 2;}
 			break;
 		case 'D':
 			fm.deemph = 1;
+			break;
+		case 'C':
+			fm.dc_block = 1;
 			break;
 		case 'N':
 			fm.mode_demod = &fm_demod;
@@ -725,6 +822,11 @@ int main(int argc, char **argv)
 	}
 	/* quadruple sample_rate to limit to Δθ to ±π/2 */
 	fm.sample_rate *= fm.post_downsample;
+
+	if (fm.freq_len == 0) {
+		fprintf(stderr, "Please specify a frequency.\n");
+		exit(1);
+	}
 
 	if (fm.freq_len > 1) {
 		fm.terminate_on_squelch = 0;
@@ -828,6 +930,8 @@ int main(int argc, char **argv)
 	else {
 		fprintf(stderr, "\nLibrary error %d, exiting...\n", r);}
 	rtlsdr_cancel_async(dev);
+	pthread_mutex_destroy(&data_ready);
+	pthread_mutex_destroy(&data_write);
 
 	if (fm.file != stdout) {
 		fclose(fm.file);}
