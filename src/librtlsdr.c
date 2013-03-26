@@ -90,6 +90,7 @@ struct rtlsdr_dev {
 	int gain; /* tenth dB */
 	struct e4k_state e4k_s;
 	int dev_lost;
+	int driver_active;
 	unsigned int xfer_errors;
 };
 
@@ -255,6 +256,7 @@ static rtlsdr_dongle_t known_devices[] = {
 	{ 0x1d19, 0x1102, "Dexatek DK DVB-T Dongle (MSI DigiVox mini II V3.0)" },
 	{ 0x1d19, 0x1103, "Dexatek Technology Ltd. DK 5217 DVB-T Dongle" },
 	{ 0x1d19, 0x1104, "MSI DigiVox Micro HD" },
+	{ 0x0413, 0x6f0f, "Leadtek WinFast DTV Dongle mini D" },
 	{ 0x0458, 0x707f, "Genius TVGo DVB-T03 USB dongle (Ver. B)" },
 	{ 0x1b80, 0xd393, "GIGABYTE GT-U7300" },
 	{ 0x1b80, 0xd394, "DIKOM USB-DVBT HD" },
@@ -1359,6 +1361,16 @@ int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
 
 	libusb_free_device_list(list, 1);
 
+	if (libusb_kernel_driver_active(dev->devh, 0) == 1) {
+		dev->driver_active = 1;
+		if (!libusb_detach_kernel_driver(dev->devh, 0)) {
+			fprintf(stderr, "Detached kernel driver\n");
+		} else {
+			fprintf(stderr, "Detaching kernel driver failed!");
+			goto err;
+		}
+	}
+
 	r = libusb_claim_interface(dev->devh, 0);
 	if (r < 0) {
 		fprintf(stderr, "usb_claim_interface error %d\n", r);
@@ -1483,6 +1495,14 @@ int rtlsdr_close(rtlsdr_dev_t *dev)
 	}
 
 	libusb_release_interface(dev->devh, 0);
+
+	if (dev->driver_active) {
+		if (!libusb_attach_kernel_driver(dev->devh, 0))
+			fprintf(stderr, "Reattached kernel driver\n");
+		else
+			fprintf(stderr, "Reattaching kernel driver failed!\n");
+	}
+
 	libusb_close(dev->devh);
 
 	libusb_exit(dev->ctx);
